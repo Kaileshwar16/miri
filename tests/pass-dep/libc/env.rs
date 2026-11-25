@@ -170,6 +170,47 @@ fn test_nsgetargv_argc() {
     assert!(argv_argc.is_null());
 }
 
+#[cfg(target_os = "macos")]
+#[allow(deprecated)] // libc deprecated _NSGetExecutablePath in favor of mach2.
+fn test_ns_get_executable_path() {
+    let mut size = 0;
+    let result = unsafe { libc::_NSGetExecutablePath(std::ptr::null_mut(), &mut size) };
+    assert_eq!(result, -1);
+    assert!(size > 1);
+    let required = size;
+
+    // Leave no room for the null terminator.
+    let mut buf = vec![1u8; required as usize - 1];
+    size = buf.len() as u32;
+    let result = unsafe { libc::_NSGetExecutablePath(buf.as_mut_ptr().cast(), &mut size) };
+    assert_eq!(result, -1);
+    assert_eq!(size, required);
+
+    // Miri uses the source file as the executable. Use that as an independent
+    // expectation, since current_exe() calls the same shim on macOS.
+    let expected = if cfg!(miri) {
+        std::fs::canonicalize(file!()).unwrap()
+    } else {
+        std::env::current_exe().unwrap().canonicalize().unwrap()
+    };
+
+    // Test both an exact fit and a larger buffer. Nonzero bytes ensure we check
+    // that the function writes the null terminator itself.
+    for capacity in [required, required + 1] {
+        let mut buf = vec![1u8; capacity as usize];
+        size = capacity;
+        let result = unsafe { libc::_NSGetExecutablePath(buf.as_mut_ptr().cast(), &mut size) };
+        assert_eq!(result, 0);
+        assert_eq!(size, capacity);
+
+        let path = CStr::from_bytes_until_nul(&buf).unwrap();
+        assert_eq!(path.to_bytes_with_nul().len(), required as usize);
+        let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()));
+        // The returned path can contain symlinks.
+        assert_eq!(path.canonicalize().unwrap(), expected);
+    }
+}
+
 fn main() {
     test_getenv();
     test_setenv();
@@ -180,4 +221,6 @@ fn main() {
     test_chdir();
     #[cfg(target_os = "macos")]
     test_nsgetargv_argc();
+    #[cfg(target_os = "macos")]
+    test_ns_get_executable_path();
 }
